@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light"><title>Aphelion · 传感器终端</title>
+<style>
+:root{font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:#132e2b;background:#f1f4ef;font-size:17px;line-height:1.55}
+*{box-sizing:border-box}body{margin:0}button,input{font:inherit}a{color:#006753}button{cursor:pointer}
+header{background:#113e38;color:#fff}.bar,main{max-width:960px;margin:auto;padding-left:clamp(16px,5vw,48px);padding-right:clamp(16px,5vw,48px)}
+.bar{min-height:72px;display:flex;align-items:center;justify-content:space-between;gap:12px}.brand{font-size:24px;font-weight:760;letter-spacing:.02em}
+#live{display:flex;align-items:center;gap:8px;font-size:15px}#live:before{content:"";width:9px;height:9px;background:#ffcd85;border-radius:100%}#live.online:before{background:#a9e8b3}
+main{padding-top:30px;padding-bottom:40px}nav{display:flex;gap:24px;border-bottom:1px solid #b1c3bb;margin-bottom:24px}
+nav button{color:#425950;background:none;border:0;border-bottom:3px solid transparent;padding:8px 3px 12px;font-weight:650}
+nav button[aria-pressed=true]{color:#005c4e;border-color:#007660}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #b67200;outline-offset:3px}
+[hidden]{display:none!important}.card{background:#fff;border:1px solid #beccc4;border-radius:12px;padding:clamp(16px,3vw,28px);margin-bottom:16px}
+.heading,.figurehead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}h1,h2,p,dl,dd{margin:0}h1,h2{font-size:clamp(22px,3.1vw,28px);line-height:1.35}small,.muted,.device{color:#465e55}.device{font-size:15px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}dt{color:#3d554e;font-weight:600}
+dd{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}dd strong{font-family:Inter,system-ui,sans-serif;font-variant-numeric:tabular-nums;font-size:clamp(34px,6vw,60px);line-height:1.18;letter-spacing:-.04em}
+dd span{font-size:clamp(14px,2.4vw,20px);color:#34534a;white-space:nowrap}.figurehead{border-top:1px solid #dce4dd;padding-top:14px;margin-top:18px;font-size:15px}
+canvas{display:block;width:100%;height:74px;margin-top:6px;background:repeating-linear-gradient(to top,#dce6df 0 1px,transparent 1px 24px)}
+.row{margin-top:18px}.row p{margin-top:4px}label{font-weight:650;display:block;margin-bottom:5px}
+input{border-radius:6px;border:1px solid #879d92;padding:10px 12px;width:100%;max-width:430px;color:inherit;background:white}
+.primary{display:block;margin-top:16px;border:0;border-radius:6px;color:#fff;background:#086553;padding:10px 24px;font-weight:650}.primary:disabled{opacity:.6;cursor:wait}
+.oled-control{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.oled-control .primary{margin:0}
+#feedback{min-height:1.5em;margin-top:10px}#offline{padding:12px 16px;background:#fff1d8;border:1px solid #b28f42;border-radius:6px;margin-bottom:16px}
+.linkbtn{background:none;border:0;padding:8px 0;color:#005f50;font-weight:650;text-align:left}.scanhead{display:flex;align-items:center;justify-content:space-between;margin-top:22px}.scanhead h2{font-size:20px}
+#net-list{list-style:none;margin:6px 0;padding:0}#net-list li{border-top:1px solid #d8e2db}
+.net{width:100%;padding:12px 3px;background:transparent;border:0;color:inherit;display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:left}.net:focus-visible,.net:hover{background:#edf6ef}.net:disabled{color:#627068;cursor:default}
+.net strong,#chosen{overflow-wrap:anywhere}.net small{font-size:14px;white-space:nowrap}
+@media(max-width:420px){.bar{min-height:58px}main{padding-top:15px}nav{margin-bottom:15px}.card{padding:15px}.metrics{gap:8px}.device{font-size:14px}}
+</style></head>
+<body><header><div class="bar"><span class="brand">Aphelion</span><span id="live" role="status">正在读取</span></div></header>
+<main><nav aria-label="页面"><button id="monitor-tab" aria-controls="monitor" aria-pressed="true">传感器</button><button id="wifi-tab" aria-controls="wifi" aria-pressed="false">Wi-Fi 接入</button></nav>
+<p id="offline" role="status" hidden>无法读取设备，正在重试。</p>
+<section id="monitor" aria-label="传感器">
+<article class="card oled-control" aria-label="OLED 控制"><div><h2>OLED 屏幕</h2><p class="device" id="oled-view" role="status">正在读取页面</p><p class="device" id="oled-feedback" role="status" hidden></p></div>
+<button id="oled-button" class="primary" type="button" disabled>切换 OLED 页面</button></article>
+<article class="card"><div class="heading"><h2>温湿度</h2><span class="device">SHT40 · <span id="environment">等待读数</span></span></div>
+<dl class="metrics"><div><dt>温度</dt><dd><strong id="temperature">—</strong><span>°C</span></dd></div><div><dt>相对湿度</dt><dd><strong id="humidity">—</strong><span>%RH</span></dd></div></dl></article>
+<article class="card"><div class="heading"><h2>声音</h2><span class="device">INMP441 · <span id="sound">等待读数</span></span></div>
+<dl class="metrics"><div><dt>估算声压级</dt><dd><strong id="spl">—</strong><span>dB SPL</span></dd></div><div><dt>数字电平</dt><dd><strong id="dbfs">—</strong><span>dBFS</span></dd></div></dl>
+<div class="figurehead"><span>近 60 秒电平</span><span class="muted">−100 至 0 dBFS</span></div><canvas id="trace" aria-label="近 60 秒数字电平趋势"></canvas></article></section>
+<section id="wifi" aria-label="Wi-Fi 接入" hidden><article class="card"><h1>网络连接</h1><div class="row"><strong>路由器状态</strong><p id="network-state" role="status">正在读取</p><a id="address" hidden></a></div>
+<div id="picker" hidden><div class="scanhead"><h2>附近的 Wi-Fi</h2><button class="linkbtn" id="rescan" type="button">重新扫描</button></div>
+<p id="scan-state" class="muted" role="status"></p><ul id="net-list"></ul><button type="button" id="other" class="linkbtn">其他网络…</button></div>
+<form id="join" hidden><button type="button" class="linkbtn" id="back-list">‹ 返回网络列表</button><h2 id="chosen"></h2>
+<div class="row" id="manual" hidden><label for="ssid">隐藏网络名称</label><input id="ssid" name="ssid" maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+<div class="row" id="pass-row"><label for="password">Wi-Fi 密码</label><input id="password" name="password" type="password" maxlength="64" autocomplete="off"><p class="muted" id="open-hint" hidden>开放网络可留空。</p></div>
+<button id="connect" class="primary" type="submit">连接</button><p id="feedback" role="status"></p></form><p class="row muted" id="setup-note"></p></article></section>
+</main><script>
+'use strict';
+const el = id => document.getElementById(id);
+let setup=false, selected=null, scanning=false, lastScan=0, connectedId='';
+const ssidText = hex => new TextDecoder().decode(Uint8Array.from((hex||'').match(/../g)||[], b=>parseInt(b,16)));
+function selectPage(wifi) {
+  el('monitor').hidden = wifi; el('wifi').hidden = !wifi;
+  if(wifi && setup && !selected && Date.now()-lastScan>15000) scanWifi();
+  el('monitor-tab').setAttribute('aria-pressed', String(!wifi));
+  el('wifi-tab').setAttribute('aria-pressed', String(wifi));
+}
+el('monitor-tab').onclick = () => selectPage(false);
+el('wifi-tab').onclick = () => selectPage(true);
+let history = [], first = true, submitting = false;
+const oledNames = {overview:'总览', environment:'温湿度详情', sound:'声音详情', setup:'Wi-Fi 配网'};
+let oledPending = false, oledRevision = 0, oledView = '';
+function showOled(view) {
+  oledView = Object.hasOwn(oledNames, view) ? view : '';
+  el('oled-view').textContent = oledView ? '当前页面 · ' + oledNames[oledView] : '等待读取页面';
+  el('oled-button').disabled = oledPending || !oledView || oledView === 'setup';
+}
+el('oled-button').onclick = async () => {
+  if (oledPending || el('oled-button').disabled) return;
+  oledPending = true;
+  ++oledRevision;
+  const feedback = el('oled-feedback');
+  feedback.hidden = true;
+  showOled(oledView);
+  try {
+    const response = await fetch('/api/button', {
+      method:'POST', headers:{'X-Aphelion':'button'}, signal:AbortSignal.timeout(5000)
+    });
+    if (response.status === 409) {
+      showOled('setup');
+      return;
+    }
+    if (!response.ok) throw Error();
+    showOled((await response.json()).oled_view);
+  } catch {
+    feedback.textContent = '未能确认切换，页面状态会自动刷新。';
+    feedback.hidden = false;
+  } finally {
+    oledPending = false;
+    showOled(oledView);
+  }
+};
+function plot() {
+  const canvas = el('trace'), width = canvas.clientWidth, height = canvas.clientHeight;
+  if (!width || !height) return;
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * scale); canvas.height = Math.round(height * scale);
+  const ctx = canvas.getContext('2d'); ctx.scale(scale,scale); ctx.lineWidth=2.5;ctx.strokeStyle='#007464';ctx.beginPath();
+  const end=Date.now(); history=history.filter(p => end-p.at <= 60000);
+  let previous=0;
+  for (const p of history) {
+    if (p.value === null) { previous=0;continue; }
+    const x=width*(1-(end-p.at)/60000), y=2+(height-4)*Math.min(100,Math.max(0,-p.value))/100;
+    if (!previous || p.at-previous>3500) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    previous=p.at;
+  }
+  ctx.stroke();
+}
+function choose(net) {
+  selected=net; el('picker').hidden=true; el('join').hidden=false;
+  el('chosen').textContent=net.manual?'其他网络':ssidText(net.ssid);
+  el('manual').hidden=!net.manual; el('ssid').required=!!net.manual; el('ssid').value='';
+  el('pass-row').hidden=net.security==='open';el('open-hint').hidden=!net.manual;
+  el('password').required=!net.manual && net.security!=='open'; el('password').value='';
+  el('feedback').textContent='';
+  (net.manual?el('ssid'):net.security==='open'?el('connect'):el('password')).focus();
+}
+el('other').onclick=()=>choose({manual:true});
+el('back-list').onclick=()=>{selected=null;el('password').value='';el('join').hidden=true;el('picker').hidden=false;el('rescan').focus();};
+el('rescan').onclick=()=>scanWifi(true);
+async function scanWifi(force=false) {
+  if(scanning || !setup) return;
+  scanning=true;el('rescan').disabled=true;el('scan-state').textContent='正在扫描 2.4 GHz 网络…';
+  try {
+    async function results() {
+      const response=await fetch('/api/networks',{cache:'no-store',signal:AbortSignal.timeout(5000)});
+      if(!response.ok) throw Error();
+      return response.json();
+    }
+    let result=await results();
+    if(!result.busy && (force || !result.fresh || result.failed)) {
+      const start=await fetch('/api/scan',{method:'POST',headers:{'X-Aphelion':'setup'},signal:AbortSignal.timeout(5000)});
+      if(!start.ok) throw Error();
+      result.busy=true;
+    }
+    for(let i=0;result.busy && i<35;i++) {
+      await new Promise(resolve=>setTimeout(resolve,750));
+      result=await results();
+    }
+    if(result.busy || result.failed) throw Error();
+    const list=el('net-list');list.replaceChildren();
+    for(const net of result.networks) {
+      const li=document.createElement('li'), btn=document.createElement('button'), name=document.createElement('strong'), meta=document.createElement('small');
+      btn.type='button';btn.className='net';btn.disabled=!net.supported;
+      name.textContent=ssidText(net.ssid);
+      const signal=net.rssi>=-60?'强':net.rssi>=-75?'中':'弱';
+      meta.textContent=(net.ssid===connectedId?'已连接 · ':'')+(net.supported?(net.security==='open'?'开放':net.security):'暂不支持')+' · '+signal;
+      btn.append(name,meta);btn.onclick=()=>choose(net);li.append(btn);list.append(li);
+    }
+    el('scan-state').textContent=result.networks.length?'':'没有找到 2.4 GHz 网络，可重新扫描。';
+    lastScan=Date.now();
+  } catch {el('scan-state').textContent='扫描未完成，请重新扫描。';}
+  finally {scanning=false;el('rescan').disabled=false;}
+}
+function show(data) {
+  for (const id of ['temperature','humidity','spl','dbfs']) el(id).textContent=Number.isFinite(data[id])?data[id].toFixed(1):'—';
+  for (const id of ['environment','sound']) el(id).textContent=data[id];
+  const states={setup:'等待配网',connecting:'正在连接路由器…',online:'已接入局域网',failed:'连接中断或失败，可检查网络名称和密码后重试。'};
+  setup=data.setup;connectedId=data.network==='online'?data.ssid:'';
+  el('network-state').textContent=(states[data.network]||'正在启动')+(connectedId?' · '+ssidText(connectedId):'');
+  if (data.network==='online' && !data.saved) el('network-state').textContent+='（设置尚未保存）';
+  const link=el('address'); link.hidden=!data.ip;
+  if (data.ip) { link.href='http://'+data.ip+'/';link.textContent=link.href; }
+  el('setup-note').textContent=data.setup?'接入成功后，将手机切回同一局域网，打开上方地址。':'更换路由器时，请连接设备热点 '+data.ap+'，再打开 192.168.4.1。';
+  el('join').hidden=!setup || !selected;el('picker').hidden=!setup || !!selected;el('connect').disabled=submitting||data.network==='connecting';
+  if (first && data.setup && data.network!=='online') selectPage(true);
+  first=false; el('live').textContent='设备在线';el('live').className='online';el('offline').hidden=true;
+  history.push({at:Date.now(),value:data.dbfs});plot();
+}
+async function poll() {
+  const revision = oledRevision;
+  try {
+    const response=await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(5000)});
+    if (!response.ok) throw Error();
+    const data = await response.json();
+    show(data);
+    if (!oledPending && revision === oledRevision) showOled(data.oled_view);
+  } catch {
+    el('live').textContent='连接中断';el('live').className='';el('offline').hidden=false;el('connect').disabled=true;
+    if (!oledPending && revision === oledRevision) showOled('');
+    for (const id of ['temperature','humidity','spl','dbfs']) el(id).textContent='—';
+    for (const id of ['environment','sound','network-state']) el(id).textContent='等待读数';
+    el('address').hidden=true;
+  } finally {setTimeout(poll,1000);}
+}
+el('join').onsubmit=async event => {
+  event.preventDefault(); if(!selected || submitting) return;
+  const params=new URLSearchParams();
+  if(selected.manual) params.set('ssid',el('ssid').value); else params.set('ssid_hex',selected.ssid);
+  params.set('password',selected.security==='open'?'':el('password').value);
+  if (new TextEncoder().encode(el('ssid').value).length>32) { el('feedback').textContent='网络名称最多 32 字节。';return; }
+  submitting=true;el('connect').disabled=true;el('feedback').textContent='正在提交…';
+  try {
+    const r=await fetch('/api/wifi',{method:'POST',headers:{'X-Aphelion':'setup'},body:params,signal:AbortSignal.timeout(6000)});
+    if (!r.ok) throw Error(r.status===400?'请检查网络名称和密码长度。':r.status===409?'已有连接请求，请稍候。':'提交失败，请确认已连上设备热点。');
+    el('password').value='';el('feedback').textContent='已提交，请查看上方路由器状态。';
+  } catch(e) {el('feedback').textContent=e.message||'提交失败，请重试。';}
+  finally {submitting=false;}
+};
+window.addEventListener('resize',plot);poll();
+</script></body></html>

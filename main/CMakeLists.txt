@@ -2,9 +2,13 @@ if(CONFIG_APHELION_TOOLBOX)
     set(app_sources "toolbox/app.c" "toolbox/radio.c" "toolbox/signal.c" "toolbox/web.c")
     set(app_page "toolbox/console.html")
 else()
-    set(app_sources "aphelion.c" "oled.c" "oled_ui.c" "sensors.c" "measurements.c"
-                    "terminal.c" "terminal_draw.c" "web.c")
+    set(app_sources "aphelion.c" "web.c")
     set(app_page "dashboard.html")
+endif()
+
+if(NOT CONFIG_APHELION_TOOLBOX OR CONFIG_APHELION_TOOLBOX_DISPLAY)
+    list(APPEND app_sources "peripherals.c" "oled.c" "oled_ui.c" "sensors.c"
+                            "measurements.c" "terminal.c" "terminal_draw.c")
 endif()
 
 idf_component_register(

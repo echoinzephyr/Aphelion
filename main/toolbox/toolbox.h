@@ -27,6 +27,8 @@ typedef struct {
     unsigned revision;
     radio_kind_t kind;
     radio_phase_t phase;
+    const char *detail;
+    int driver_error;
     wifi_scan_list_t wifi;
     unsigned ble_count;
     toolbox_ble_record_t ble[TOOLBOX_BLE_RESULTS];

@@ -1,6 +1,10 @@
 #include "toolbox.h"
 
 #include "esp_log.h"
+#include "sdkconfig.h"
+#if CONFIG_APHELION_TOOLBOX_DISPLAY
+#include "sensors.h"
+#endif
 
 void app_main(void)
 {
@@ -11,4 +15,7 @@ void app_main(void)
     ESP_ERROR_CHECK(toolbox_signal_init());
     ESP_ERROR_CHECK(web_start());
     ESP_ERROR_CHECK(network_start_connections());
+#if CONFIG_APHELION_TOOLBOX_DISPLAY
+    ESP_ERROR_CHECK_WITHOUT_ABORT(aphelion_start_peripherals(true));
+#endif
 }

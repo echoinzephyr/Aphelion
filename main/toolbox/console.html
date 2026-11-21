@@ -148,6 +148,10 @@ footer {font-size:.8rem;color:var(--muted);margin-top:15px}
     <p id="join-feedback" class="note" role="status"></p>
   </form>
 </section>
+<div id="display-panel" class="panel output heading" hidden>
+  <div><h2>设备屏幕</h2><p id="display-state" class="note" role="status"></p></div>
+  <button type="button" id="display-next" class="secondary" disabled>切换 OLED 页面</button>
+</div>
 <footer>ESP32-S3 · <span id="heap">内存状态等待连接</span></footer>
 </main>
 <script>
@@ -155,7 +159,7 @@ footer {font-size:.8rem;color:var(--muted);margin-top:15px}
 const el = id => document.getElementById(id);
 const tabs = [...document.querySelectorAll('nav button')];
 let socket, token = '', pending = false, heartbeat, reconnect, latestWave;
-let activeScan = '', state = {};
+let activeScan = '', state = {}, display = null;
 const address = hex => hex.match(/../g)?.join(':') || '—';
 const bytes = hex => Uint8Array.from(hex.match(/../g) || [], pair => parseInt(pair, 16));
 const decoder = new TextDecoder();
@@ -181,6 +185,7 @@ function enable() {
   for (const id of ['scope-start', 'scope-demo', 'pwm-start']) el(id).disabled = blocked;
   el('scope-stop').disabled = blocked || !state.capturing;
   el('pwm-stop').disabled = blocked || !state.pwm;
+  el('display-next').disabled = blocked || !display?.oled || display.view === 'setup';
 }
 
 async function command(path) {
@@ -216,6 +221,25 @@ el('pwm-form').onsubmit = event => {
   command('/api/pwm?' + new URLSearchParams({on:'1', hz:el('hz').value, duty:el('duty').value}));
 };
 el('pwm-stop').onclick = () => command('/api/pwm?on=0');
+el('display-next').onclick = async () => {
+  await command('/api/display');
+  await refreshDisplay();
+};
+async function refreshDisplay() {
+  try {
+    const response = await fetch('/api/display', {cache:'no-store', signal:AbortSignal.timeout(4000)});
+    if (!response.ok) return;
+    display = await response.json();
+    el('display-panel').hidden = !display.oled;
+    const views = {overview:'总览', environment:'温湿度', sound:'声音', setup:'配网'};
+    el('display-state').textContent = '当前页面 · ' + (views[display.view] || '读取中');
+    enable();
+  } catch {
+    // A missed reading leaves the last known display state visible.
+  }
+}
+setInterval(refreshDisplay, 2500);
+refreshDisplay();
 
 function row(table, cells) {
   const tr = document.createElement('tr');
@@ -281,6 +305,9 @@ function showScan(scan) {
   activeScan = scan.phase === 'running' ? scan.kind : '';
   if (scan.kind === 'wifi' || scan.kind === 'ble') {
     const messages = {running:'扫描中…', cancelled:'扫描已取消', failed:'扫描未完成，可以重试。'};
+    if (scan.detail === 'radio_busy') messages.failed = '无线资源忙，等配网或另一项扫描结束后再试。';
+    if (scan.detail === 'timeout') messages.failed = '扫描未在预期时间内完成，请重试。';
+    if (scan.detail === 'driver' && scan.error) messages.failed = '扫描驱动返回错误 ' + scan.error + '。';
     el(scan.kind + '-status').textContent = messages[scan.phase] ||
       (scan.results.length ? '找到 ' + scan.results.length + ' 个结果' : '没有发现设备');
     const table = el(scan.kind + '-results');

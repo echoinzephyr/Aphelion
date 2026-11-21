@@ -1,5 +1,11 @@
 #include "toolbox.h"
 #include "web_wifi.h"
+#include "sdkconfig.h"
+#include <math.h>
+#if CONFIG_APHELION_TOOLBOX_DISPLAY
+#include "oled.h"
+#include "sensors.h"
+#endif
 
 #include <stdatomic.h>
 #include <stdarg.h>
@@ -151,6 +157,48 @@ static bool read_unsigned(const char *query, const char *field, unsigned min, un
     return true;
 }
 
+static esp_err_t display_status(httpd_req_t *req)
+{
+#if CONFIG_APHELION_TOOLBOX_DISPLAY
+    environment_t env;
+    sound_t sound;
+    sensor_snapshot(&env, &sound);
+    char temp[16] = "null", humidity[16] = "null", sound_level[16] = "null";
+    if (env.status == SAMPLE_OK) {
+        snprintf(temp, sizeof(temp), "%.1f", env.celsius);
+        snprintf(humidity, sizeof(humidity), "%.1f", env.humidity);
+    }
+    if ((sound.status == SAMPLE_OK || sound.status == SAMPLE_CLIPPING) && isfinite(sound.dbfs)) {
+        snprintf(sound_level, sizeof(sound_level), "%.1f", sound.dbfs);
+    }
+    char json[200];
+    snprintf(json, sizeof(json),
+             "{\"oled\":%s,\"view\":\"%s\",\"temperature\":%s,\"humidity\":%s,\"dbfs\":%s}",
+             oled_is_ready() ? "true" : "false",
+             network_snapshot().phase == NET_ONLINE ? terminal_view_name(oled_selected_view()) : "setup",
+             temp, humidity, sound_level);
+    return send_json(req, json);
+#else
+    return send_json(req, "{\"oled\":false}");
+#endif
+}
+
+static esp_err_t display_next(httpd_req_t *req)
+{
+    if (!valid_control(req)) {
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Open the active control session");
+    }
+#if CONFIG_APHELION_TOOLBOX_DISPLAY
+    if (!oled_is_ready() || network_snapshot().phase != NET_ONLINE) {
+        return conflict(req, "OLED unavailable or showing Wi-Fi setup");
+    }
+    oled_press();
+    return display_status(req);
+#else
+    return conflict(req, "OLED is unavailable");
+#endif
+}
+
 static esp_err_t control(httpd_req_t *req)
 {
     if (!valid_control(req)) {
@@ -224,14 +272,28 @@ static bool append(char **out, size_t *remaining, const char *format, ...)
     return true;
 }
 
+static const char *const scan_kinds[] = {"none", "wifi", "ble"};
+static const char *const scan_phases[] = {"idle", "running", "done", "cancelled", "failed"};
+
+static esp_err_t radio_status(httpd_req_t *req)
+{
+    static toolbox_scan_t scan;
+    toolbox_scan_snapshot(UINT32_MAX, &scan);
+    char json[185];
+    snprintf(json, sizeof(json),
+             "{\"kind\":\"%s\",\"phase\":\"%s\",\"detail\":\"%s\",\"error\":%d,\"count\":%u}",
+             scan_kinds[scan.kind], scan_phases[scan.phase], scan.detail ? scan.detail : "",
+             scan.driver_error, scan.kind == RADIO_BLE ? scan.ble_count : scan.wifi.count);
+    return send_json(req, json);
+}
+
 static esp_err_t send_scan(const toolbox_scan_t *result)
 {
-    static const char *const kinds[] = {"none", "wifi", "ble"};
-    static const char *const phases[] = {"idle", "running", "done", "cancelled", "failed"};
     char *out = scan_json;
     size_t remaining = sizeof(scan_json);
-    if (!append(&out, &remaining, "{\"type\":\"scan\",\"kind\":\"%s\",\"phase\":\"%s\",\"results\":[",
-                kinds[result->kind], phases[result->phase])) return ESP_ERR_INVALID_SIZE;
+    if (!append(&out, &remaining, "{\"type\":\"scan\",\"kind\":\"%s\",\"phase\":\"%s\",\"detail\":\"%s\",\"error\":%d,\"results\":[",
+                scan_kinds[result->kind], scan_phases[result->phase],
+                result->detail ? result->detail : "", result->driver_error)) return ESP_ERR_INVALID_SIZE;
     if (result->kind == RADIO_WIFI) {
         for (unsigned i = 0; i < result->wifi.count; ++i) {
             const nearby_network_t *ap = &result->wifi.items[i];
@@ -337,7 +399,7 @@ esp_err_t web_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 14;
     config.stack_size = 6144;
     config.close_fn = controller_closed;
     config.recv_wait_timeout = 1;
@@ -349,6 +411,9 @@ esp_err_t web_start(void)
         {.uri = "/api/scan", .method = HTTP_POST, .handler = control},
         {.uri = "/api/pwm", .method = HTTP_POST, .handler = control},
         {.uri = "/api/scope", .method = HTTP_POST, .handler = control},
+        {.uri = "/api/display", .method = HTTP_GET, .handler = display_status},
+        {.uri = "/api/display", .method = HTTP_POST, .handler = display_next},
+        {.uri = "/api/radio", .method = HTTP_GET, .handler = radio_status},
         {.uri = "/api/network", .method = HTTP_GET, .handler = web_wifi_status},
         {.uri = "/api/wifi/scan", .method = HTTP_POST, .handler = web_wifi_scan_start},
         {.uri = "/api/wifi/networks", .method = HTTP_GET, .handler = web_wifi_scan_results},

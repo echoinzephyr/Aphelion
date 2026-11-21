@@ -19,7 +19,23 @@ enum { OLED_HEIGHT = 64 };
 enum { ROWS = OLED_HEIGHT / 16 };
 static const char *TAG = "oled";
 static portMUX_TYPE view_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool display_ready;
 static terminal_view_t selected_view = TERMINAL_OVERVIEW;
+
+bool oled_is_ready(void)
+{
+    portENTER_CRITICAL(&view_lock);
+    bool ready = display_ready;
+    portEXIT_CRITICAL(&view_lock);
+    return ready;
+}
+
+static void set_display_ready(bool ready)
+{
+    portENTER_CRITICAL(&view_lock);
+    display_ready = ready;
+    portEXIT_CRITICAL(&view_lock);
+}
 
 terminal_view_t oled_selected_view(void)
 {
@@ -140,10 +156,12 @@ void oled_task(void *arg)
             ESP_LOGW(TAG, "OLED write failed: %s", esp_err_to_name(ui.flush_status));
             i2c_master_bus_rm_device(ui.device);
             ui.device = NULL;
+            set_display_ready(false);
             ui.flush_status = ESP_OK;
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+        set_display_ready(true);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }

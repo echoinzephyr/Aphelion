@@ -4,9 +4,14 @@ menu "Aphelion hardware"
         bool "Build the headless toolbox firmware"
         default n
 
+    config APHELION_TOOLBOX_DISPLAY
+        bool "Enable the optional OLED and sensors in the toolbox"
+        depends on APHELION_TOOLBOX
+        default y
+
     choice APHELION_OLED_MODEL
         prompt "I2C OLED controller and size"
-        depends on !APHELION_TOOLBOX
+        depends on !APHELION_TOOLBOX || APHELION_TOOLBOX_DISPLAY
         default APHELION_OLED_SSD1306_64
 
         config APHELION_OLED_SSD1306_64

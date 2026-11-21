@@ -4,7 +4,7 @@ Aphelion 是 ESP32-S3 上的离线 Web 工具箱，也提供带 SH1106 OLED、SH
 
 ## 构建
 
-在 ESP-IDF 6.1.1 环境中执行。两个配置使用独立的构建目录，支持当前 2 MiB Flash 布局。
+在 ESP-IDF 6.1.1 环境中执行。两个配置使用独立的构建目录，支持当前 2 MiB Flash 布局。工具箱配置会检测 OLED，接有屏幕时可显示网络和传感器读数。
 
 | 固件 | 构建命令 |
 | --- | --- |
@@ -29,7 +29,7 @@ idf.py -B build-toolbox -D APHELION_TOOLBOX=ON -p /dev/ttyACM0 flash monitor
 
 ## Web 接口
 
-`GET /api/capabilities` 返回工具列表、引脚和采样参数。`/ws` 建立控制连接，发送 `hello`、`status` 和 `scan` JSON 消息，并推送示波器二进制帧。浏览器每秒发一次文本 `ping`，五秒未收到心跳时释放控制。REST 命令 `POST /api/scan`、`POST /api/pwm` 和 `POST /api/scope` 通过查询参数传入操作，并使用 WebSocket 会话提供的 `X-Aphelion-Control` 令牌。
+`GET /api/capabilities` 返回工具列表、引脚和采样参数。`/ws` 建立控制连接，发送 `hello`、`status` 和 `scan` JSON 消息，并推送示波器二进制帧。浏览器每秒发一次文本 `ping`，五秒未收到心跳时释放控制。REST 命令 `POST /api/scan`、`POST /api/pwm` 和 `POST /api/scope` 通过查询参数传入操作，并使用 WebSocket 会话提供的 `X-Aphelion-Control` 令牌。屏幕可用时，`GET /api/display` 返回屏幕状态与传感器摘要，`POST /api/display` 使用同一令牌切换 OLED 页面。
 
 `GET /api/network` 返回路由器连接状态和局域网地址。配网页使用 `POST /api/wifi/scan`、`GET /api/wifi/networks` 和 `POST /api/wifi`，这些接口限设备热点侧调用。
 

@@ -1,4 +1,5 @@
 #include "toolbox.h"
+#include "web_wifi.h"
 
 #include <stdatomic.h>
 #include <stdarg.h>
@@ -16,7 +17,7 @@
 
 extern const char toolbox_page[] asm("_binary_console_html_start");
 static const char *const TAG = "tool_web";
-static const char *const origin = "http://192.168.4.1";
+
 static httpd_handle_t server;
 static atomic_bool work_pending;
 static int controller = -1;
@@ -66,7 +67,12 @@ static bool header_matches(httpd_req_t *req, const char *header, const char *exp
 
 static esp_err_t ws_before(httpd_req_t *req)
 {
-    if (!header_matches(req, "Origin", origin) || !header_matches(req, "Host", "192.168.4.1")) {
+    const network_info_t net = network_snapshot();
+    const char *host = web_wifi_on_hotspot(req) ? "192.168.4.1" : net.ip;
+    char expected_origin[32];
+    snprintf(expected_origin, sizeof(expected_origin), "http://%s", host);
+    if (!host[0] || !header_matches(req, "Origin", expected_origin) ||
+        !header_matches(req, "Host", host)) {
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Open the Aphelion address directly");
         return ESP_FAIL;
     }
@@ -331,7 +337,7 @@ esp_err_t web_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 12;
     config.stack_size = 6144;
     config.close_fn = controller_closed;
     config.recv_wait_timeout = 1;
@@ -343,6 +349,10 @@ esp_err_t web_start(void)
         {.uri = "/api/scan", .method = HTTP_POST, .handler = control},
         {.uri = "/api/pwm", .method = HTTP_POST, .handler = control},
         {.uri = "/api/scope", .method = HTTP_POST, .handler = control},
+        {.uri = "/api/network", .method = HTTP_GET, .handler = web_wifi_status},
+        {.uri = "/api/wifi/scan", .method = HTTP_POST, .handler = web_wifi_scan_start},
+        {.uri = "/api/wifi/networks", .method = HTTP_GET, .handler = web_wifi_scan_results},
+        {.uri = "/api/wifi", .method = HTTP_POST, .handler = web_wifi_join},
         {.uri = "/ws", .method = HTTP_GET, .handler = ws_recv, .is_websocket = true,
          .ws_pre_handshake_cb = ws_before, .ws_post_handshake_cb = ws_after},
     };

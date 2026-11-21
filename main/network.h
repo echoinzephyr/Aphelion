@@ -41,7 +41,10 @@ typedef struct {
 } wifi_scan_list_t;
 
 // Start the local AP and initialize the station interface for background scans.
-esp_err_t network_start_hotspot(void);
+esp_err_t network_prepare(void);
+esp_err_t network_start_connections(void);
+bool network_radio_acquire(void);
+void network_radio_release(void);
 esp_err_t network_collect_wifi(wifi_scan_list_t *list, bool collapse_by_name);
 bool network_scan_request(void);
 void network_scan_snapshot(wifi_scan_list_t *result);

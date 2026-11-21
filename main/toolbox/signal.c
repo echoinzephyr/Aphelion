@@ -113,7 +113,9 @@ static esp_err_t apply_pwm(const toolbox_signal_status_t *config)
         return ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1);
     }
     const uint32_t duty = ((1u << resolution) * config->duty + 50) / 100;
-    return ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty, 0);
+    // This worker exclusively owns the channel, so the fade-service lock is unnecessary.
+    ESP_RETURN_ON_ERROR(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty), TAG, "PWM duty");
+    return ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
 static esp_err_t adc_open(adc_continuous_handle_t *adc, adc_cali_handle_t *calibration)

@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -19,6 +20,8 @@ static const char *TAG = "network";
 enum { HAS_IP = BIT0, DISCONNECTED = BIT1, STA_STOPPED = BIT2 };
 static EventGroupHandle_t events;
 static QueueHandle_t requests;
+static SemaphoreHandle_t radio_lock;
+static nvs_handle_t storage;
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static network_info_t info;
 static esp_netif_t *station;
@@ -198,21 +201,25 @@ static esp_err_t start_network(nvs_handle_t *storage)
     return ESP_OK;
 }
 
-esp_err_t network_start_hotspot(void)
+esp_err_t network_prepare(void)
 {
+    requests = xQueueCreate(2, sizeof(network_command_t));
     events = xEventGroupCreate();
-    if (!events) {
+    radio_lock = xSemaphoreCreateMutex();
+    if (!requests || !events || !radio_lock) {
         return ESP_ERR_NO_MEM;
     }
-    nvs_handle_t storage = 0;
-    esp_err_t err = start_network(&storage);
-    if (storage) {
-        nvs_close(storage);
-    }
-    if (err == ESP_OK) {
-        err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-    }
-    return err;
+    return start_network(&storage);
+}
+
+bool network_radio_acquire(void)
+{
+    return xSemaphoreTake(radio_lock, 0) == pdTRUE;
+}
+
+void network_radio_release(void)
+{
+    xSemaphoreGive(radio_lock);
 }
 
 static bool connect_station(const wifi_credentials_t *credentials, char ip[16])
@@ -239,18 +246,8 @@ static bool connect_station(const wifi_credentials_t *credentials, char ip[16])
     return true;
 }
 
-void network_task(void *arg)
+static void network_run(void *arg)
 {
-    nvs_handle_t storage;
-    requests = xQueueCreate(2, sizeof(network_command_t));
-    events = xEventGroupCreate();
-    if (!requests || !events || start_network(&storage) != ESP_OK || web_start() != ESP_OK) {
-        ESP_LOGE(TAG, "Network startup failed");
-        set_status(NET_FAILED, "", false);
-        vTaskDelete(NULL);
-        return;
-    }
-
     wifi_credentials_t saved = {0};
     size_t len = sizeof(saved);
     bool has_saved = nvs_get_blob(storage, "station", &saved, &len) == ESP_OK &&
@@ -264,11 +261,17 @@ void network_task(void *arg)
         network_command_t cmd = {0};
         bool submitted = xQueueReceive(requests, &cmd, pdMS_TO_TICKS(250)) == pdTRUE;
         if (submitted && cmd.scan) {
+            xSemaphoreTake(radio_lock, portMAX_DELAY);
             scan_networks();
+            network_radio_release();
             continue;
         }
+        if (!submitted) {
+            if (online && !(xEventGroupGetBits(events) & DISCONNECTED)) continue;
+            if (!online && (!has_saved || esp_timer_get_time() < retry_us)) continue;
+        }
+        xSemaphoreTake(radio_lock, portMAX_DELAY);
         if (online) {
-            if (!submitted && !(xEventGroupGetBits(events) & DISCONNECTED)) continue;
             esp_wifi_set_mode(WIFI_MODE_AP);
             xEventGroupWaitBits(events, STA_STOPPED, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
             online = false;
@@ -276,7 +279,10 @@ void network_task(void *arg)
             retry_us = esp_timer_get_time() + 2000000;
         }
         if (!submitted) {
-            if (!has_saved || esp_timer_get_time() < retry_us) continue;
+            if (!has_saved || esp_timer_get_time() < retry_us) {
+                network_radio_release();
+                continue;
+            }
             cmd.credentials = saved;
         }
         set_status(NET_CONNECTING, "", has_saved);
@@ -305,5 +311,22 @@ void network_task(void *arg)
             }
             retry_us = esp_timer_get_time() + 20000000;
         }
+        network_radio_release();
     }
+}
+
+esp_err_t network_start_connections(void)
+{
+    return xTaskCreate(network_run, "network", 6144, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+void network_task(void *arg)
+{
+    if (network_prepare() != ESP_OK || web_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Network startup failed");
+        set_status(NET_FAILED, "", false);
+        vTaskDelete(NULL);
+        return;
+    }
+    network_run(NULL);
 }

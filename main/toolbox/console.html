@@ -62,6 +62,13 @@ form {margin-top:16px}
 .fields {display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px}
 label {display:block;color:var(--muted)}
 input {display:block;max-width:220px;width:100%;margin-top:4px;background:#fff;padding:9px;border:1px solid #9aafa3;border-radius:7px}
+#join-networks {padding:0;list-style:none;margin:0}
+#join-networks button {display:flex;justify-content:space-between;text-align:left;width:100%;gap:12px;
+  background:transparent;color:inherit;padding:12px 3px;border:0;border-bottom:1px solid var(--line)}
+#join-networks button strong,#join-title {overflow-wrap:anywhere}
+#join-networks button span {white-space:nowrap;color:var(--muted);font-size:.85rem}
+#join-networks button:hover:not(:disabled) {background:#eef3ed}
+#join-address {color:var(--green)}
 footer {font-size:.8rem;color:var(--muted);margin-top:15px}
 @media (max-width:440px) {nav button{font-size:.88rem;padding:8px} .top{min-height:56px}}
 </style>
@@ -74,6 +81,7 @@ footer {font-size:.8rem;color:var(--muted);margin-top:15px}
   <button type="button" data-tool="ble" aria-pressed="false" aria-controls="ble">BLE 扫描</button>
   <button type="button" data-tool="scope" aria-pressed="false" aria-controls="scope">数字示波器</button>
   <button type="button" data-tool="pwm" aria-pressed="false" aria-controls="pwm">PWM 发生器</button>
+  <button type="button" data-tool="join" aria-pressed="false" aria-controls="join">Wi-Fi 接入</button>
 </nav>
 <p id="message" role="status"></p>
 <section id="wifi" class="panel">
@@ -118,6 +126,28 @@ footer {font-size:.8rem;color:var(--muted);margin-top:15px}
   </form>
   <p class="note" id="pwm-status" role="status">输出已停止</p>
 </section>
+<section id="join" class="panel" hidden>
+  <h1>Wi-Fi 接入</h1>
+  <p id="join-state" class="note" role="status">正在读取网络状态</p>
+  <a id="join-address" hidden></a>
+  <p id="join-help" class="note"></p>
+  <div id="join-picker" class="output" hidden>
+    <div class="heading"><h2>附近的路由器</h2><button id="join-scan" class="secondary" type="button">重新扫描</button></div>
+    <p id="join-scan-state" class="note" role="status"></p>
+    <ul id="join-networks"></ul>
+    <button id="join-other" class="secondary" type="button">其他网络</button>
+  </div>
+  <form id="join-form" hidden>
+    <button id="join-back" class="secondary" type="button">返回网络列表</button>
+    <h2 class="output" id="join-title"></h2>
+    <div class="fields">
+      <label id="join-manual" for="join-ssid">2.4 GHz 网络名称<input id="join-ssid" maxlength="32" autocomplete="off" autocapitalize="none"></label>
+      <label id="join-pass-row" for="join-password">Wi-Fi 密码<input id="join-password" type="password" maxlength="64" autocomplete="off"></label>
+    </div>
+    <button id="join-connect" class="action" type="submit">连接路由器</button>
+    <p id="join-feedback" class="note" role="status"></p>
+  </form>
+</section>
 <footer>ESP32-S3 · <span id="heap">内存状态等待连接</span></footer>
 </main>
 <script>
@@ -137,6 +167,7 @@ for (const tab of tabs) {
       item.setAttribute('aria-pressed', selected);
       el(item.dataset.tool).hidden = !selected;
     }
+    if (tab.dataset.tool === 'join') refreshNetwork(true);
     draw();
   };
 }
@@ -376,6 +407,146 @@ function connect() {
     reconnect = setTimeout(connect, 1500);
   };
 }
+let network = null, joinChoice = null, joining = false, joinScanning = false, scannedOnce = false;
+
+async function refreshNetwork(autoScan = false) {
+  try {
+    const response = await fetch('/api/network', {cache:'no-store', signal:AbortSignal.timeout(4000)});
+    if (!response.ok) throw Error();
+    network = await response.json();
+    const phases = {
+      starting:'正在启动', setup:'尚未连接路由器', connecting:'正在连接路由器…',
+      online:'已接入局域网', failed:'连接失败或中断，可重新选择网络。',
+    };
+    const ssid = network.phase === 'online' ? decoder.decode(bytes(network.ssid)) : '';
+    el('join-state').textContent = (phases[network.phase] || '正在读取') + (ssid ? ' · ' + ssid : '');
+    if (network.phase === 'online' && !network.saved) el('join-state').textContent += '（未保存）';
+    const link = el('join-address');
+    link.hidden = !network.ip;
+    if (network.ip) {
+      link.href = 'http://' + network.ip + '/';
+      link.textContent = link.href;
+    }
+    el('join-help').textContent = network.setup ?
+      '连接成功后，可切回路由器 Wi-Fi，再打开上方地址。' :
+      '如需更换配网，请连接设备热点 ' + network.ap + '，再打开 192.168.4.1。';
+    el('join-picker').hidden = !network.setup || !!joinChoice;
+    el('join-form').hidden = !network.setup || !joinChoice;
+    el('join-connect').disabled = joining || network.phase === 'connecting';
+    if (autoScan && network.setup && !scannedOnce && !joinChoice) scanForRouter(false);
+  } catch {
+    el('join-state').textContent = '无法读取网络状态，正在重试。';
+    el('join-connect').disabled = true;
+  }
+}
+
+function selectRouter(item) {
+  joinChoice = item;
+  el('join-picker').hidden = true;
+  el('join-form').hidden = false;
+  el('join-title').textContent = item.manual ? '其他网络' : decoder.decode(bytes(item.ssid));
+  el('join-manual').hidden = !item.manual;
+  el('join-ssid').required = !!item.manual;
+  el('join-ssid').value = '';
+  el('join-pass-row').hidden = item.security === 'open';
+  el('join-password').required = !item.manual && item.security !== 'open';
+  el('join-password').value = '';
+  el('join-feedback').textContent = '';
+  el('join-connect').disabled = joining || network.phase === 'connecting';
+  (item.manual ? el('join-ssid') : item.security === 'open' ? el('join-connect') : el('join-password')).focus();
+}
+
+async function scanForRouter(force) {
+  if (joinScanning || !network?.setup) return;
+  joinScanning = true;
+  scannedOnce = true;
+  el('join-scan').disabled = true;
+  el('join-scan-state').textContent = '正在扫描 2.4 GHz 网络…';
+  try {
+    async function scanResults() {
+      const response = await fetch('/api/wifi/networks', {cache:'no-store', signal:AbortSignal.timeout(4000)});
+      if (!response.ok) throw Error();
+      return response.json();
+    }
+    let result = await scanResults();
+    if (!result.busy && (force || !result.fresh || result.failed)) {
+      const response = await fetch('/api/wifi/scan', {
+        method:'POST', headers:{'X-Aphelion':'setup'}, signal:AbortSignal.timeout(4000),
+      });
+      if (!response.ok) throw Error();
+      result.busy = true;
+    }
+    for (let tries = 0; result.busy && tries < 40; ++tries) {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      result = await scanResults();
+    }
+    if (result.busy || result.failed) throw Error();
+    const list = el('join-networks');
+    list.replaceChildren();
+    for (const item of result.networks) {
+      const li = document.createElement('li'), button = document.createElement('button');
+      const title = document.createElement('strong'), detail = document.createElement('span');
+      button.type = 'button';
+      button.disabled = !item.supported;
+      title.textContent = decoder.decode(bytes(item.ssid));
+      detail.textContent = (item.supported ? (item.security === 'open' ? '开放' : item.security) : '暂不支持') + ' · ' + item.rssi + ' dBm';
+      button.append(title, detail);
+      button.onclick = () => selectRouter(item);
+      li.append(button);
+      list.append(li);
+    }
+    el('join-scan-state').textContent = result.networks.length ? '' : '没有找到网络，可重新扫描。';
+  } catch {
+    el('join-scan-state').textContent = '扫描未完成，请稍后重试。';
+  } finally {
+    joinScanning = false;
+    el('join-scan').disabled = false;
+  }
+}
+
+el('join-scan').onclick = () => scanForRouter(true);
+el('join-other').onclick = () => selectRouter({manual:true});
+el('join-back').onclick = () => {
+  joinChoice = null;
+  el('join-password').value = '';
+  el('join-picker').hidden = false;
+  el('join-form').hidden = true;
+};
+el('join-form').onsubmit = async event => {
+  event.preventDefault();
+  if (!joinChoice || joining) return;
+  const params = new URLSearchParams();
+  if (joinChoice.manual) {
+    const ssid = el('join-ssid').value;
+    if (!ssid || new TextEncoder().encode(ssid).length > 32) {
+      el('join-feedback').textContent = '网络名称须为 1–32 字节。';
+      return;
+    }
+    params.set('ssid', ssid);
+  } else {
+    params.set('ssid_hex', joinChoice.ssid);
+  }
+  params.set('password', joinChoice.security === 'open' ? '' : el('join-password').value);
+  joining = true;
+  el('join-connect').disabled = true;
+  try {
+    const response = await fetch('/api/wifi', {
+      method:'POST', headers:{'X-Aphelion':'setup'}, body:params, signal:AbortSignal.timeout(4000),
+    });
+    if (!response.ok) throw Error(response.status === 400 ? '请检查网络名称和密码长度。' : '路由器请求未提交，请重试。');
+    el('join-password').value = '';
+    el('join-feedback').textContent = '已提交，请查看上方连接状态。';
+  } catch (err) {
+    el('join-feedback').textContent = err.message;
+  } finally {
+    joining = false;
+    refreshNetwork();
+  }
+};
+setInterval(() => {
+  if (!el('join').hidden) refreshNetwork(true);
+}, 1500);
+
 window.addEventListener('resize', draw);
 channels([]);
 connect();

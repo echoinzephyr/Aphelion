@@ -19,17 +19,23 @@ static TaskHandle_t worker;
 static uint8_t local_address_type;
 static bool ble_ready;
 static bool cancel_requested;
+static bool scan_in_driver;
 void ble_store_config_init(void);
 
 static void ble_sync(void)
 {
     uint8_t type;
-    bool ready = ble_hs_id_infer_auto(0, &type) == 0;
+    int err = ble_hs_util_ensure_addr(0);
+    if (err == 0) err = ble_hs_id_infer_auto(0, &type);
     portENTER_CRITICAL(&lock);
-    if (ready) local_address_type = type;
-    ble_ready = ready;
+    if (err == 0) local_address_type = type;
+    ble_ready = err == 0;
     portEXIT_CRITICAL(&lock);
-    if (ready) ESP_LOGI("tool_radio", "BLE scanner ready");
+    if (err == 0) {
+        ESP_LOGI("tool_radio", "BLE scanner ready");
+    } else {
+        ESP_LOGW("tool_radio", "BLE scanner address unavailable: %d", err);
+    }
 }
 
 static void ble_reset(int reason)
@@ -48,7 +54,7 @@ static void ble_host(void *arg)
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     portENTER_CRITICAL(&lock);
-    bool scanning = scan.kind == RADIO_WIFI && scan.phase == RADIO_RUNNING;
+    bool scanning = scan.kind == RADIO_WIFI && scan_in_driver;
     portEXIT_CRITICAL(&lock);
     if (scanning) {
         const wifi_event_sta_scan_done_t *result = data;
@@ -148,7 +154,10 @@ static bool start_scan(radio_kind_t kind)
     const struct ble_gap_disc_params options = {
         .itvl = 80, .window = 32, .filter_duplicates = 1,
     };
-    return ready && ble_gap_disc(address, 4000, &options, ble_event, NULL) == 0;
+    if (!ready) return false;
+    const int err = ble_gap_disc(address, 4000, &options, ble_event, NULL);
+    if (err != 0) ESP_LOGW("tool_radio", "BLE discovery did not start: %d", err);
+    return err == 0;
 }
 
 static bool cancelled(void)
@@ -184,9 +193,13 @@ static void radio_worker(void *arg)
         radio_kind_t kind = scan.kind;
         portEXIT_CRITICAL(&lock);
         radio_phase_t phase = RADIO_FAILED;
+        bool reserved = !cancelled() && network_radio_acquire();
+        portENTER_CRITICAL(&lock);
+        scan_in_driver = reserved;
+        portEXIT_CRITICAL(&lock);
         if (cancelled()) {
             phase = RADIO_CANCELLED;
-        } else if (start_scan(kind)) {
+        } else if (reserved && start_scan(kind)) {
             events = wait_for_scan();
             if (events & SCAN_CANCEL || !(events & SCAN_COMPLETE)) {
                 if (!(events & SCAN_COMPLETE)) {
@@ -212,9 +225,11 @@ static void radio_worker(void *arg)
         portENTER_CRITICAL(&lock);
         if (phase == RADIO_DONE && kind == RADIO_WIFI) scan.wifi = wifi;
         if (phase != RADIO_DONE) scan.ble_count = 0;
+        scan_in_driver = false;
         scan.phase = phase;
         ++scan.revision;
         portEXIT_CRITICAL(&lock);
+        if (reserved) network_radio_release();
     }
 }
 

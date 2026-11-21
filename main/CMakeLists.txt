@@ -8,7 +8,7 @@ else()
 endif()
 
 idf_component_register(
-    SRCS "network.c" ${app_sources}
+    SRCS "network.c" "web_wifi.c" ${app_sources}
     EMBED_TXTFILES ${app_page}
     INCLUDE_DIRS "."
     PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_ledc

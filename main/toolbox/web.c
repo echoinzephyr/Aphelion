@@ -1,5 +1,10 @@
 #include "toolbox.h"
+#include "ble_explorer.h"
+#include <inttypes.h>
 #include "web_wifi.h"
+#include "web_status.h"
+#include "device_clock.h"
+#include "device_settings.h"
 #include "sdkconfig.h"
 #include <math.h>
 #if CONFIG_APHELION_TOOLBOX_DISPLAY
@@ -21,7 +26,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-extern const char toolbox_page[] asm("_binary_console_html_start");
 static const char *const TAG = "tool_web";
 
 static httpd_handle_t server;
@@ -30,6 +34,7 @@ static int controller = -1;
 static int64_t last_heartbeat;
 static char token[17];
 static unsigned scan_revision;
+static uint32_t ble_revision;
 static uint32_t wave_sequence;
 static int64_t next_status;
 static char scan_json[8192];
@@ -45,13 +50,6 @@ static esp_err_t send_json(httpd_req_t *req, const char *json)
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);
-}
-
-static esp_err_t home(httpd_req_t *req)
-{
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(req, toolbox_page);
 }
 
 static esp_err_t capabilities(httpd_req_t *req)
@@ -95,6 +93,7 @@ static esp_err_t ws_after(httpd_req_t *req)
 {
     controller = httpd_req_to_sockfd(req);
     scan_revision = UINT32_MAX;
+    ble_revision = UINT32_MAX;
     wave_sequence = 0;
     next_status = 0;
     last_heartbeat = esp_timer_get_time();
@@ -112,6 +111,7 @@ static void controller_closed(httpd_handle_t handle, int socket)
         token[0] = '\0';
         toolbox_signal_release();
         toolbox_scan_cancel();
+        explorer_release();
     }
     close(socket);
 }
@@ -272,6 +272,137 @@ static bool append(char **out, size_t *remaining, const char *format, ...)
     return true;
 }
 
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool read_ble_address(const char *query, uint8_t out[6])
+{
+    char address[13];
+    if (httpd_query_key_value(query, "address", address, sizeof(address)) != ESP_OK ||
+        strlen(address) != 12) return false;
+    for (unsigned i = 0; i < 6; ++i) {
+        const int hi = hex_nibble(address[i * 2]), lo = hex_nibble(address[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[5 - i] = (hi << 4) | lo;
+    }
+    return true;
+}
+
+static bool receive_value(httpd_req_t *req, uint8_t *out, size_t capacity)
+{
+    if (req->content_len > capacity) return false;
+    size_t offset = 0;
+    while (offset < req->content_len) {
+        const int read = httpd_req_recv(req, (char *)out + offset, req->content_len - offset);
+        if (read <= 0) return false;
+        offset += read;
+    }
+    return true;
+}
+
+static esp_err_t ble_control(httpd_req_t *req)
+{
+    if (!valid_control(req)) {
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Open the active control session");
+    }
+    char query[100], op[16];
+    const char *bad = "Invalid BLE command";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "op", op, sizeof(op)) != ESP_OK ||
+        (req->content_len && strcmp(op, "write"))) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+    }
+    int rc;
+    if (!strcmp(op, "connect")) {
+        uint8_t address[6];
+        unsigned type;
+        if (!read_ble_address(query, address) || !read_unsigned(query, "addr_type", 0, 3, &type)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+        }
+        rc = toolbox_ble_connect(type, address);
+    } else if (!strcmp(op, "disconnect")) {
+        rc = explorer_disconnect();
+    } else {
+        unsigned handle;
+        if (!read_unsigned(query, "handle", 1, 65535, &handle)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+        }
+        if (!strcmp(op, "read")) {
+            rc = explorer_read(handle);
+        } else if (!strcmp(op, "write")) {
+            unsigned no_response;
+            uint8_t value[BLE_EXPLORER_VALUE];
+            if (!read_unsigned(query, "no_response", 0, 1, &no_response) ||
+                !receive_value(req, value, sizeof(value))) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+            }
+            rc = explorer_write(handle, value, req->content_len, no_response);
+        } else if (!strcmp(op, "subscribe")) {
+            unsigned mode;
+            if (!read_unsigned(query, "mode", 0, 2, &mode)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+            }
+            rc = explorer_subscribe(handle, mode);
+        } else {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+        }
+    }
+    if (rc) {
+        char message[48];
+        snprintf(message, sizeof(message), "BLE 请求失败 (%d)", rc);
+        return conflict(req, message);
+    }
+    httpd_resp_set_status(req, "202 Accepted");
+    return send_json(req, "{\"accepted\":true}");
+}
+
+static esp_err_t send_explorer(const explorer_snapshot_t *ble)
+{
+    const char *const phases[] = {"idle", "connecting", "discovering", "ready", "closing"};
+    char address[13], *out = scan_json;
+    size_t remaining = sizeof(scan_json);
+    hex_text(address, ble->address, 6, true);
+    if (!append(&out, &remaining, "{\"type\":\"ble\",\"phase\":\"%s\",\"address\":\"%s\",\"addr_type\":%u,"
+               "\"error\":%d,\"mtu\":%u,\"busy\":%s,\"limited\":%s,\"dropped\":%" PRIu32 ",\"services\":[",
+               phases[ble->phase], address, ble->address_type, ble->error, ble->mtu,
+               as_bool(ble->busy), as_bool(ble->limited), ble->dropped)) return ESP_ERR_INVALID_SIZE;
+    for (unsigned i = 0; i < ble->service_count; ++i) {
+        const explorer_service_t *svc = &ble->services[i];
+        if (!append(&out, &remaining, "%s{\"start\":%u,\"end\":%u,\"uuid\":\"%s\"}",
+                    i ? "," : "", svc->start, svc->end, svc->uuid)) return ESP_ERR_INVALID_SIZE;
+    }
+    if (!append(&out, &remaining, "],\"chars\":[")) return ESP_ERR_INVALID_SIZE;
+    for (unsigned i = 0; i < ble->characteristic_count; ++i) {
+        const explorer_characteristic_t *chr = &ble->chars[i];
+        if (!append(&out, &remaining, "%s{\"service\":%u,\"handle\":%u,\"properties\":%u,\"uuid\":\"%s\",\"subscription\":%u}",
+                    i ? "," : "", chr->service, chr->handle, chr->properties, chr->uuid,
+                    chr->subscription)) return ESP_ERR_INVALID_SIZE;
+    }
+    if (!append(&out, &remaining, "]}")) return ESP_ERR_INVALID_SIZE;
+    return send_ws(HTTPD_WS_TYPE_TEXT, scan_json, out - scan_json);
+}
+
+static esp_err_t send_explorer_value(const explorer_value_t *value)
+{
+    const char *const events[] = {"read", "write", "subscribe", "notify", "indicate"};
+    char *out = scan_json;
+    size_t remaining = sizeof(scan_json);
+    if (!append(&out, &remaining, "{\"type\":\"ble_value\",\"event\":\"%s\",\"ms\":%" PRId64 ","
+               "\"handle\":%u,\"status\":%d,\"truncated\":%s,\"unacknowledged\":%s,\"value\":\"",
+               events[value->event], value->elapsed_ms, value->handle, value->status,
+               as_bool(value->truncated), as_bool(value->unacknowledged)) ||
+        remaining < value->length * 2 + 3) return ESP_ERR_INVALID_SIZE;
+    hex_text(out, value->value, value->length, false);
+    out += value->length * 2;
+    memcpy(out, "\"}", 2);
+    return send_ws(HTTPD_WS_TYPE_TEXT, scan_json, out + 2 - scan_json);
+}
+
 static const char *const scan_kinds[] = {"none", "wifi", "ble"};
 static const char *const scan_phases[] = {"idle", "running", "done", "cancelled", "failed"};
 
@@ -312,8 +443,8 @@ static esp_err_t send_scan(const toolbox_scan_t *result)
             hex_text(adv, record->adv, record->adv_size, false);
             hex_text(response, record->response, record->response_size, false);
             if (!append(&out, &remaining,
-                        "%s{\"address\":\"%s\",\"address_type\":%u,\"rssi\":%d,\"adv\":\"%s\",\"response\":\"%s\"}",
-                        i ? "," : "", address, record->address_type, record->rssi, adv, response)) return ESP_ERR_INVALID_SIZE;
+                        "%s{\"address\":\"%s\",\"address_type\":%u,\"rssi\":%d,\"connectable\":%s,\"adv\":\"%s\",\"response\":\"%s\"}",
+                        i ? "," : "", address, record->address_type, record->rssi, as_bool(record->connectable), adv, response)) return ESP_ERR_INVALID_SIZE;
         }
     }
     if (!append(&out, &remaining, "]}")) return ESP_ERR_INVALID_SIZE;
@@ -359,6 +490,8 @@ static void emit(void *context)
 {
     static toolbox_scan_t scan;
     static toolbox_wave_t wave;
+    static explorer_snapshot_t ble;
+    static explorer_value_t value;
     const int64_t now = esp_timer_get_time();
     esp_err_t err = ESP_OK;
     if (controller != -1) {
@@ -368,6 +501,13 @@ static void emit(void *context)
         if (err == ESP_OK && toolbox_scan_snapshot(scan_revision, &scan)) {
             err = send_scan(&scan);
             scan_revision = scan.revision;
+        }
+        if (err == ESP_OK && explorer_snapshot(ble_revision, &ble)) {
+            err = send_explorer(&ble);
+            ble_revision = ble.revision;
+        }
+        for (unsigned i = 0; i < 4 && err == ESP_OK && explorer_next_value(&value); ++i) {
+            err = send_explorer_value(&value);
         }
         if (err == ESP_OK && now >= next_status) {
             err = send_status();
@@ -399,21 +539,28 @@ esp_err_t web_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 21;
     config.stack_size = 6144;
     config.close_fn = controller_closed;
     config.recv_wait_timeout = 1;
     config.send_wait_timeout = 1;
     ESP_RETURN_ON_ERROR(httpd_start(&server, &config), TAG, "HTTP startup");
     const httpd_uri_t routes[] = {
-        {.uri = "/", .method = HTTP_GET, .handler = home},
+        {.uri = "/", .method = HTTP_GET, .handler = web_home},
+        {.uri = "/api/status", .method = HTTP_GET, .handler = web_status},
+        {.uri = "/api/button", .method = HTTP_POST, .handler = web_oled_button},
         {.uri = "/api/capabilities", .method = HTTP_GET, .handler = capabilities},
         {.uri = "/api/scan", .method = HTTP_POST, .handler = control},
+        {.uri = "/api/ble", .method = HTTP_POST, .handler = ble_control},
         {.uri = "/api/pwm", .method = HTTP_POST, .handler = control},
         {.uri = "/api/scope", .method = HTTP_POST, .handler = control},
         {.uri = "/api/display", .method = HTTP_GET, .handler = display_status},
         {.uri = "/api/display", .method = HTTP_POST, .handler = display_next},
         {.uri = "/api/radio", .method = HTTP_GET, .handler = radio_status},
+        {.uri = "/api/time", .method = HTTP_GET, .handler = device_clock_status},
+        {.uri = "/api/time", .method = HTTP_POST, .handler = web_time_set},
+        {.uri = "/api/settings", .method = HTTP_GET, .handler = web_settings_get},
+        {.uri = "/api/settings", .method = HTTP_PUT, .handler = web_settings_put},
         {.uri = "/api/network", .method = HTTP_GET, .handler = web_wifi_status},
         {.uri = "/api/wifi/scan", .method = HTTP_POST, .handler = web_wifi_scan_start},
         {.uri = "/api/wifi/networks", .method = HTTP_GET, .handler = web_wifi_scan_results},

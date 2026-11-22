@@ -20,7 +20,7 @@ const char *sample_status_label(sample_status_t status)
 
 const char *terminal_view_name(terminal_view_t view)
 {
-    static const char *const names[] = {"overview", "environment", "sound"};
+    static const char *const names[] = {"overview", "environment", "sound", "clock"};
     return names[view];
 }
 
@@ -84,4 +84,20 @@ void terminal_format(terminal_view_t view, const environment_t *env, const sound
     } else {
         snprintf(page->line[3], cap, "-- dB SPL");
     }
+}
+
+void terminal_format_clock(const struct tm *local, const char *address, terminal_page_t *page)
+{
+    memset(page, 0, sizeof(*page));
+    const size_t cap = sizeof(page->line[0]);
+    if (local) {
+        strftime(page->line[0], cap, "%H:%M:%S", local);
+        strftime(page->line[1], cap, "%Y-%m-%d", local);
+        strftime(page->line[2], cap, "%a  UTC+8", local);
+    } else {
+        snprintf(page->line[0], cap, "--:--:--");
+        snprintf(page->line[1], cap, "Waiting for NTP");
+        snprintf(page->line[2], cap, "UTC+8");
+    }
+    snprintf(page->line[3], cap, "%s", address);
 }

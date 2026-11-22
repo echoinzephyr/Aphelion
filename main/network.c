@@ -1,4 +1,6 @@
 #include "network.h"
+#include "device_clock.h"
+#include "device_settings.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -183,6 +185,7 @@ static esp_err_t start_access_point(nvs_handle_t storage)
 static esp_err_t start_network(nvs_handle_t *storage)
 {
     ESP_RETURN_ON_ERROR(nvs_flash_init(), TAG, "NVS init");
+    ESP_RETURN_ON_ERROR(device_settings_init(), TAG, "UI settings");
     ESP_RETURN_ON_ERROR(nvs_open("aphelion_net", NVS_READWRITE, storage), TAG, "open settings");
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "TCP/IP");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
@@ -301,6 +304,7 @@ static void network_run(void *arg)
             memcpy(info.connected_ssid, cmd.credentials.ssid, sizeof(info.connected_ssid));
             portEXIT_CRITICAL(&lock);
             set_status(NET_ONLINE, ip, persisted);
+            device_clock_sync();
             online = true;
             ESP_LOGI(TAG, "Station online at http://%s (saved=%d)", ip, persisted);
         } else {

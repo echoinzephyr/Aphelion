@@ -17,6 +17,7 @@ typedef struct {
     uint8_t address[6];
     uint8_t address_type;
     int8_t rssi;
+    bool connectable;
     uint8_t adv_size;
     uint8_t response_size;
     uint8_t adv[31];
@@ -37,6 +38,7 @@ typedef struct {
 esp_err_t toolbox_radio_init(void);
 bool toolbox_scan_start(radio_kind_t kind);
 bool toolbox_scan_cancel(void);
+int toolbox_ble_connect(uint8_t type, const uint8_t address[6]);
 bool toolbox_scan_snapshot(unsigned after_revision, toolbox_scan_t *snapshot);
 
 typedef struct {

@@ -81,7 +81,8 @@ static void test_pages(void)
     assert(strcmp(page.line[0], "INMP441") == 0);
     assert(strcmp(page.line[1], "-26.0 dBFS") == 0);
     assert(strcmp(page.line[2], "~94.0 dB SPL") == 0);
-    assert(terminal_next_view(view) == TERMINAL_OVERVIEW);
+    assert(terminal_next_view(view) == TERMINAL_CLOCK);
+    assert(terminal_next_view(TERMINAL_CLOCK) == TERMINAL_OVERVIEW);
 
     terminal_format(view, &env, &sound, "", "Aphelion-4D05", "ABCDEFGH2345", &page);
     assert(strcmp(page.line[0], "Aphelion-4D05") == 0);
@@ -96,6 +97,17 @@ static void test_pages(void)
     assert(strcmp(page.line[2], "-- dBFS") == 0);
     assert(strcmp(page.line[3], "-- dB SPL") == 0);
     assert(strcmp(sample_status_label(env.status), "校验失败") == 0);
+
+    struct tm time = {.tm_year = 126, .tm_mon = 10, .tm_mday = 21,
+                      .tm_wday = 6, .tm_hour = 7, .tm_min = 5, .tm_sec = 2};
+    terminal_format_clock(&time, ip, &page);
+    assert(strcmp(page.line[0], "07:05:02") == 0);
+    assert(strcmp(page.line[1], "2026-11-21") == 0);
+    assert(strcmp(page.line[2], "Sat  UTC+8") == 0);
+    assert(strcmp(page.line[3], ip) == 0);
+    terminal_format_clock(NULL, ip, &page);
+    assert(strcmp(page.line[0], "--:--:--") == 0);
+    assert(strcmp(page.line[1], "Waiting for NTP") == 0);
 }
 
 static void test_oled_layout(void)

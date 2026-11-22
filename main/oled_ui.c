@@ -1,4 +1,6 @@
 #include "oled.h"
+#include "oled_layout.h"
+#include "device_clock.h"
 #include "network.h"
 #include "sensors.h"
 #include "sdkconfig.h"
@@ -8,7 +10,9 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "lvgl.h"
+#if CONFIG_APHELION_TOOLBOX
+#include "toolbox/toolbox.h"
+#endif
 
 #if CONFIG_APHELION_OLED_SSD1306_32
 enum { OLED_HEIGHT = 32 };
@@ -16,11 +20,10 @@ enum { OLED_HEIGHT = 32 };
 enum { OLED_HEIGHT = 64 };
 #endif
 
-enum { ROWS = OLED_HEIGHT / 16 };
 static const char *TAG = "oled";
 static portMUX_TYPE view_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool display_ready;
-static terminal_view_t selected_view = TERMINAL_OVERVIEW;
+static terminal_view_t selected_view = TERMINAL_CLOCK;
 
 bool oled_is_ready(void)
 {
@@ -68,28 +71,16 @@ static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     static uint8_t frame[OLED_FRAME_BYTES];
     oled_ui_t *ui = lv_display_get_user_data(display);
-    // Rasterize antialiased glyphs before thresholding them for the 1-bit OLED.
+    // Pack the LVGL canvas and monochrome glyphs into the OLED controller pages.
     terminal_oled_pack(pixels, OLED_HEIGHT, frame);
     ui->flush_status = oled_write(ui->device, frame, OLED_HEIGHT);
     lv_display_flush_ready(display);
 }
 
-static void set_label(lv_obj_t *label, const char *text, const lv_font_t *preferred)
-{
-    if (strcmp(lv_label_get_text(label), text) != 0) {
-        const lv_font_t *font = preferred;
-        if (lv_text_get_width(text, strlen(text), font, 0) > OLED_WIDTH - 8) {
-            font = &lv_font_unscii_8;
-        }
-        lv_obj_set_style_text_font(label, font, 0);
-        lv_obj_set_style_pad_top(label, (16 - (int)font->line_height) / 2, 0);
-        lv_label_set_text(label, text);
-    }
-}
-
 void oled_task(void *arg)
 {
     static _Alignas(4) uint8_t draw_buffer[OLED_WIDTH * OLED_HEIGHT];
+    static _Alignas(4) uint8_t layout_buffer[OLED_WIDTH * OLED_HEIGHT];
     i2c_master_bus_handle_t bus = arg;
     oled_ui_t ui = {0};
     lv_init();
@@ -106,24 +97,13 @@ void oled_task(void *arg)
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    lv_obj_t *labels[ROWS];
-    for (unsigned row = 0; row < ROWS; ++row) {
-        lv_obj_t *label = lv_label_create(screen);
-        lv_obj_remove_style_all(label);
-        lv_obj_set_size(label, OLED_WIDTH, 16);
-        lv_obj_set_pos(label, 0, row * 16);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
-        lv_obj_set_style_pad_left(label, 4, 0);
-        lv_obj_set_style_pad_right(label, 4, 0);
-        lv_obj_set_style_text_color(label, row == 0 ? lv_color_black() : lv_color_white(), 0);
-        if (row == 0) {
-            lv_obj_set_style_bg_color(label, lv_color_white(), 0);
-            lv_obj_set_style_bg_opa(label, LV_OPA_COVER, 0);
-        }
-        lv_label_set_text(label, "");
-        labels[row] = label;
-    }
+    oled_layout_t layout;
+    oled_layout_init(&layout, screen, layout_buffer, OLED_HEIGHT);
+    oled_content_t last = {0};
+    unsigned last_shift = 0;
+    bool redraw = true;
     bool missing_reported = false;
+    uint32_t next_update = 0;
     for (;;) {
         if (!ui.device) {
             esp_err_t err = oled_open(bus, &ui.device);
@@ -136,20 +116,44 @@ void oled_task(void *arg)
                 continue;
             }
             missing_reported = false;
-            lv_obj_invalidate(screen);
+            redraw = true;
         }
 
-        environment_t env;
-        sound_t audio;
-        sensor_snapshot(&env, &audio);
         network_info_t net = network_snapshot();
-        terminal_page_t page;
-        terminal_format(net.ip[0] ? oled_selected_view() : TERMINAL_OVERVIEW,
-                        &env, &audio, net.ip, net.ap, net.key, &page);
-        unsigned start = ROWS == 2 && (elapsed_ms() / 4000) % 2 ? 2 : 0;
-        for (unsigned row = 0; row < ROWS; ++row) {
-            set_label(labels[row], page.line[start + row],
-                      row == 0 ? &lv_font_montserrat_14 : &lv_font_montserrat_12);
+        oled_content_t content = {
+            .view = oled_selected_view(),
+            .setup = !net.ip[0],
+        };
+        content.synced = !content.setup && device_clock_read(&content.local);
+        if (content.setup) {
+            memcpy(content.ap, net.ap, sizeof(content.ap));
+            memcpy(content.key, net.key, sizeof(content.key));
+        } else if (content.view != TERMINAL_CLOCK) {
+            sensor_snapshot(&content.environment, &content.sound);
+        }
+#if CONFIG_APHELION_TOOLBOX
+        content.working = toolbox_signal_status().pwm;
+#endif
+        const uint32_t now = elapsed_ms();
+        const unsigned shift = (now / 60000) % 4;
+        const bool page_changed = content.view != last.view || content.setup != last.setup;
+        const bool update = content.synced != last.synced || content.working != last.working ||
+                            content.local.tm_sec != last.local.tm_sec ||
+                            content.local.tm_min != last.local.tm_min ||
+                            content.local.tm_hour != last.local.tm_hour ||
+                            content.local.tm_yday != last.local.tm_yday ||
+                            content.environment.last_good_us != last.environment.last_good_us ||
+                            content.environment.status != last.environment.status ||
+                            content.sound.sampled_us != last.sound.sampled_us ||
+                            content.sound.status != last.sound.status ||
+                            strcmp(content.ap, last.ap) != 0 || strcmp(content.key, last.key) != 0;
+        if (redraw || page_changed || shift != last_shift ||
+            (update && (int32_t)(now - next_update) >= 0)) {
+            oled_layout_update(&layout, &content, shift);
+            last = content;
+            last_shift = shift;
+            redraw = false;
+            next_update = now + 250;
         }
         lv_timer_handler();
         if (ui.flush_status != ESP_OK) {

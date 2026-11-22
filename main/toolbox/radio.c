@@ -1,4 +1,6 @@
 #include "toolbox.h"
+#include "ble_explorer.h"
+#include "nimble/hci_common.h"
 
 #include <string.h>
 #include "esp_event.h"
@@ -43,6 +45,7 @@ static void ble_reset(int reason)
     portENTER_CRITICAL(&lock);
     ble_ready = false;
     portEXIT_CRITICAL(&lock);
+    explorer_reset(reason);
 }
 
 static void ble_host(void *arg)
@@ -62,6 +65,28 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+static toolbox_ble_record_t *scan_peer(const struct ble_gap_disc_desc *adv)
+{
+    unsigned weakest = 0;
+    for (unsigned i = 0; i < scan.ble_count; ++i) {
+        toolbox_ble_record_t *record = &scan.ble[i];
+        if (record->address_type == adv->addr.type &&
+            !memcmp(record->address, adv->addr.val, sizeof(record->address))) return record;
+        if (record->rssi < scan.ble[weakest].rssi) weakest = i;
+    }
+    unsigned index;
+    if (scan.ble_count < TOOLBOX_BLE_RESULTS) {
+        index = scan.ble_count++;
+    } else {
+        if (adv->rssi <= scan.ble[weakest].rssi || adv->rssi == 127) return NULL;
+        index = weakest;
+    }
+    toolbox_ble_record_t *record = &scan.ble[index];
+    *record = (toolbox_ble_record_t){.address_type = adv->addr.type};
+    memcpy(record->address, adv->addr.val, sizeof(record->address));
+    return record;
+}
+
 static int ble_event(struct ble_gap_event *event, void *arg)
 {
     if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {
@@ -77,27 +102,18 @@ static int ble_event(struct ble_gap_event *event, void *arg)
     const struct ble_gap_disc_desc *adv = &event->disc;
     portENTER_CRITICAL(&lock);
     if (scan.kind == RADIO_BLE && scan.phase == RADIO_RUNNING) {
-        unsigned i;
-        for (i = 0; i < scan.ble_count; ++i) {
-            const toolbox_ble_record_t *record = &scan.ble[i];
-            if (record->address_type == adv->addr.type &&
-                !memcmp(record->address, adv->addr.val, sizeof(record->address))) break;
-        }
-        if (i < TOOLBOX_BLE_RESULTS) {
-            toolbox_ble_record_t *record = &scan.ble[i];
-            if (i == scan.ble_count) {
-                *record = (toolbox_ble_record_t){ .address_type = adv->addr.type };
-                memcpy(record->address, adv->addr.val, sizeof(record->address));
-                ++scan.ble_count;
-            }
+        toolbox_ble_record_t *record = scan_peer(adv);
+        if (record) {
             const size_t size = adv->length_data > sizeof(record->adv) ? sizeof(record->adv) : adv->length_data;
-            record->rssi = adv->rssi;
+            record->rssi = adv->rssi == 127 ? -127 : adv->rssi;
             if (adv->event_type == BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) {
                 memcpy(record->response, adv->data, size);
                 record->response_size = size;
             } else {
                 memcpy(record->adv, adv->data, size);
                 record->adv_size = size;
+                record->connectable = adv->event_type == BLE_HCI_ADV_RPT_EVTYPE_ADV_IND ||
+                                      adv->event_type == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND;
             }
         }
     }
@@ -105,8 +121,31 @@ static int ble_event(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
+int toolbox_ble_connect(uint8_t type, const uint8_t address[6])
+{
+    int rc = BLE_HS_ENOENT;
+    portENTER_CRITICAL(&lock);
+    const uint8_t own = local_address_type;
+    if (!ble_ready) {
+        rc = BLE_HS_ENOTSYNCED;
+    } else if (scan.phase == RADIO_RUNNING) {
+        rc = BLE_HS_EBUSY;
+    } else if (scan.kind == RADIO_BLE && scan.phase == RADIO_DONE) {
+        for (unsigned i = 0; i < scan.ble_count; ++i) {
+            const toolbox_ble_record_t *record = &scan.ble[i];
+            if (record->address_type == type && !memcmp(record->address, address, 6)) {
+                rc = record->connectable ? 0 : BLE_HS_ENOTSUP;
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&lock);
+    return rc ? rc : explorer_connect(own, type, address);
+}
+
 bool toolbox_scan_start(radio_kind_t kind)
 {
+    if (explorer_active()) return false;
     portENTER_CRITICAL(&lock);
     bool allowed = scan.phase != RADIO_RUNNING;
     if (allowed) {

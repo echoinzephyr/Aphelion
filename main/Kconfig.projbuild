@@ -1,11 +1,11 @@
 menu "Aphelion hardware"
 
     config APHELION_TOOLBOX
-        bool "Build the headless toolbox firmware"
+        bool "Build the Web toolbox firmware"
         default n
 
     config APHELION_TOOLBOX_DISPLAY
-        bool "Enable the optional OLED and sensors in the toolbox"
+        bool "Enable OLED and sensors in the Web toolbox"
         depends on APHELION_TOOLBOX
         default y
 
